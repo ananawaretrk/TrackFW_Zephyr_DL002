@@ -1,0 +1,6 @@
+board:
+  name: dl002
+  full_name: MOKO DL002
+  vendor: moko
+  socs:
+  - name: efr32bg22c224f512gm32

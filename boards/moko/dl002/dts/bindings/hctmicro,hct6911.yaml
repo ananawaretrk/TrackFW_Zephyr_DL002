@@ -1,0 +1,13 @@
+description: HCT Micro HCT6911 24-bit sigma-delta ADC (SPI)
+
+compatible: "hctmicro,hct6911"
+
+include: spi-device.yaml
+
+properties:
+  drdy-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      DOUT/DRDY# pin (same pin as MISO). Goes low when a conversion
+      result is ready to be read.

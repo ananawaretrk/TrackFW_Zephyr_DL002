@@ -1,0 +1,199 @@
+/*
+ * MOKO DL002 temperature probe, board MKB(SL)DL002_V1.0_20260509.
+ *
+ * Sources: [SCH] SCH_MKB(SL)DL002_V1.0.pdf, [DS] efr32bg22-datasheet.pdf
+ */
+
+/dts-v1/;
+#include <silabs/xg22/efr32bg22c224f512gm32.dtsi>	/* [DS] p.3: 512 KB flash, 32 KB RAM, QFN32 */
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/regulator/silabs_dcdc.h>
+#include "dl002-pinctrl.dtsi"
+
+/ {
+	model = "MOKO DL002";
+	compatible = "moko,dl002", "silabs,efr32bg22";
+
+	chosen {
+		zephyr,bt-hci = &bt_hci_silabs;
+		zephyr,console = &usart1;	/* only used if UART console is enabled */
+		zephyr,code-partition = &slot0_partition;
+		zephyr,flash = &flash0;
+		zephyr,sram = &sram0;
+	};
+
+	aliases {
+		led0 = &led_green;
+		led1 = &led_red;
+		sw0 = &button0;
+	};
+
+	/* [SCH] LED box: VDD -> resistor -> LED -> pin => active LOW (tested on hardware) */
+	leds {
+		compatible = "gpio-leds";
+
+		led_green: led_green {
+			gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;	/* PA04, R98 100R, LED2 */
+		};
+
+		led_red: led_red {
+			gpios = <&gpioc 2 GPIO_ACTIVE_LOW>;	/* PC02, R1 470R, LED1 */
+		};
+	};
+
+	/* [SCH] Mechanical Switch: SW1 -> R6 1K -> PB01, other side GND, no external pull-up */
+	buttons {
+		compatible = "gpio-keys";
+
+		button0: button_0 {
+			gpios = <&gpiob 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;	/* PB01, not yet tested */
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+
+	/* [SCH] Boost 3.3V: U6 LP62610-33 EN = PA03, VOUT = ADC_3.3V -> HCT6911 AVDD/DVDD.
+	 * PA03 is also SWV: never enable SWO trace on this board.
+	 */
+	adc_3v3: adc_3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "adc_3v3";
+		enable-gpios = <&gpioa 3 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <2000>;	/* UNVERIFIED: no LP62610 datasheet, safe guess */
+		regulator-boot-on;
+	};
+};
+
+/* [DS] p.3: max CPU 76.8 MHz */
+&cpu0 {
+	clock-frequency = <76800000>;
+};
+
+/* [SCH] X1 38.4 MHz, no external load caps. [DS] p.22: only 38.4 MHz supported.
+ * UNVERIFIED: crystal part unknown. ctune/precision are the Silicon Labs BG22
+ * defaults (also AL300 + dev kit). Check ctune at the Bluetooth stage; ask MOKO.
+ */
+&hfxo {
+	ctune = <140>;
+	precision = <50>;
+	status = "okay";
+};
+
+/* 38.4 MHz * (3839 + 1) / (1919 + 1) = 76.8 MHz. Settings from the dev kit. */
+&hfrcodpll {
+	clock-frequency = <DT_FREQ_K(76800)>;
+	clocks = <&hfxo>;
+	dpll-autorecover;
+	dpll-edge = "fall";
+	dpll-lock = "phase";
+	dpll-m = <1919>;
+	dpll-n = <3839>;
+};
+
+/* [SCH] L3 2.2 uH + C18 4.7 uF fitted. [DS] p.23: DC-DC needs 2.2 uH / 4.7 uF */
+&dcdc {
+	regulator-boot-on;
+	regulator-initial-mode = <SILABS_DCDC_MODE_BUCK>;
+	status = "okay";
+};
+
+/* [SCH] UART box: TX pad = PA00, RX pad = PB00 (pins in dl002-pinctrl.dtsi) */
+&usart1 {
+	current-speed = <115200>;
+	pinctrl-0 = <&usart1_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&gpio {
+	status = "okay";
+};
+
+&gpioa {
+	status = "okay";
+};
+
+&gpiob {
+	status = "okay";
+};
+
+&gpioc {
+	status = "okay";
+};
+
+&gpiod {
+	status = "okay";
+};
+
+/* [SCH] PT100 box: SPI to U11 HCT6911 (pins in dl002-pinctrl.dtsi).
+ * [HCT] p.32: SCLK max 10 MHz. CS# (pin 2) is active low.
+ */
+&usart0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clock-frequency = <1000000>;
+	pinctrl-0 = <&usart0_default>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioc 4 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	/* [SCH] U11 HCT6911, CS# = PC04 (cs-gpios index 0) */
+	hct6911: hct6911@0 {
+		compatible = "hctmicro,hct6911";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(1)>;
+		/* [SCH] pin 15 DOUT/DRDY# -> R78 -> PC03 (= MISO). LOW = conversion ready ([HCT] p.26) */
+		drdy-gpios = <&gpioc 3 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/* Zephyr system clock (sleeptimer) runs on RTCC0 */
+&rtcc0 {
+	status = "okay";
+};
+
+/* Bluetooth controller (disabled by default in efr32bg22.dtsi) */
+&bt_hci_silabs {
+	status = "okay";
+};
+
+/* Random numbers for Bluetooth; chip dtsi already points zephyr,entropy here */
+&trng {
+	status = "okay";
+};
+
+/* [SCH] PAVDD (pin 13) <- L4 ferrite <- VDCDC. [DS] p.23: DC-DC output 1.8 V.
+ * Chip default assumes 3300 mV.
+ */
+&radio {
+	pa-voltage-mv = <1800>;
+};
+
+/* Software layout of the 512 KB flash, same as the dev kit. Only matters once MCUboot is added. */
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			reg = <0x00000000 DT_SIZE_K(48)>;
+			label = "mcuboot";
+			read-only;
+		};
+
+		slot0_partition: partition@c000 {
+			reg = <0x0000c000 DT_SIZE_K(224)>;
+			label = "image-0";
+		};
+
+		slot1_partition: partition@44000 {
+			reg = <0x00044000 DT_SIZE_K(224)>;
+			label = "image-1";
+		};
+
+		storage_partition: partition@7c000 {
+			reg = <0x0007c000 DT_SIZE_K(16)>;
+			label = "storage";
+		};
+	};
+};

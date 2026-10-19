@@ -1,0 +1,15 @@
+if BOARD_DL002
+
+# Silicon Labs radio library is built for the hardware FPU
+config FPU
+	default y if SOC_GECKO_USE_RAIL || BT
+
+if BT
+
+# bt_enable() from main() needs more than the default stack (same as AL300)
+config MAIN_STACK_SIZE
+	default 2304
+
+endif # BT
+
+endif # BOARD_DL002

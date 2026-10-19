@@ -1,0 +1,43 @@
+# West manifest for the DL002 firmware workspace.
+#
+# This repo is the manifest repo and the top of the workspace. It owns the
+# application code and the dl002 board definition, and pins which Silicon Labs
+# Zephyr release we build against. Everything else (zephyr, HALs, mcuboot, ...)
+# is pulled in by `west update` and must NOT be committed here.
+#
+# Revisions are deliberately identical to the AL300 workspace: a known-good
+# combination that already builds and runs BLE on Silabs parts.
+manifest:
+  version: "0.13"
+
+  remotes:
+    - name: silabs
+      url-base: https://github.com/SiliconLabsSoftware
+    - name: trackonomy
+      url-base: https://github.com/Trackonomy
+
+  projects:
+    - name: zephyr
+      remote: trackonomy
+      repo-path: zephyr
+      revision: 4cea6c57529d84d9d8eb96299e63779ad87cf3c7
+      import:
+        name-allowlist:
+          - cmsis-dsp
+          - cmsis-nn
+          - cmsis_6
+          - fatfs
+          - littlefs
+          - lvgl
+          - picolibc
+          - segger
+          - zcbor
+
+    - name: zephyr-silabs
+      remote: silabs
+      repo-path: zephyr-silabs
+      revision: v2025.12.1
+      import: true
+
+  self:
+    path: dl002

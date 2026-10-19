@@ -1,0 +1,48 @@
+#include <dt-bindings/pinctrl/silabs/xg22-pinctrl.h>
+
+&pinctrl {
+	/* UART edge pads: TX = PA00, RX = PB00 (schematic UART box).
+	 * USART1 TX/RX can route to ports A and B (datasheet p.89, GPIO table).
+	 */
+	usart1_default: usart1_default {
+		/* TX: chip talks -> output, idles HIGH (UART idle level) */
+		group0 {
+			pins = <USART1_TX_PA0>;
+			drive-push-pull;
+			output-high;
+		};
+
+		/* RX: chip listens -> input, filter out short noise spikes */
+		group1 {
+			pins = <USART1_RX_PB0>;
+			input-enable;
+			silabs,input-filter;
+		};
+	};
+
+	/* SPI to HCT6911: SCLK = PA06, MOSI = PB02, MISO = PC03 ([SCH] PT100 box).
+	 * USART0 CLK/TX/RX can route to any port ([DS] p.89).
+	 */
+	usart0_default: usart0_default {
+		/* MOSI: BG22 data out */
+		group0 {
+			pins = <USART0_TX_PB2>;
+			drive-push-pull;
+			output-high;
+		};
+
+		/* SCLK: low when not communicating ([HCT] p.14 pin 1; SPI mode 0) */
+		group1 {
+			pins = <USART0_CLK_PA6>;
+			drive-push-pull;
+			output-low;
+		};
+
+		/* MISO: BG22 listens, data from HCT6911 */
+		group2 {
+			pins = <USART0_RX_PC3>;
+			input-enable;
+			silabs,input-filter;
+		};
+	};
+};

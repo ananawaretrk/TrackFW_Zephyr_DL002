@@ -1,0 +1,20 @@
+/* DL002 LEDs (schematic "LED" box): VDD -> resistor -> LED -> MCU pin => active LOW */
+
+/* Green LED, PA04. The dev kit already has led0 on PA04 (active HIGH), so only fix the polarity */
+&led0 {
+	gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+};
+
+/ {
+	leds {
+		/* Red LED, PC02. The dev kit has no second LED, so add a new one */
+		led1: led_1 {
+			gpios = <&gpioc 2 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	aliases {
+		/* Short name so C code can find it with DT_ALIAS(led1) */
+		led1 = &led1;
+	};
+};

@@ -112,7 +112,12 @@ int hct6911_init(void)
 		printf("HCT6911 init FAILED: DRDY GPIO port not ready\n");
 		return -ENODEV;
 	}
-	return gpio_pin_configure_dt(&drdy, GPIO_INPUT);
+	int err = gpio_pin_configure_dt(&drdy, GPIO_INPUT);
+
+	if (err) {
+		printf("HCT6911 init FAILED: DRDY pin configure error %d\n", err);
+	}
+	return err;
 }
 
 #define HCT6911_RESET_WAIT_MS  15	/* reset takes 10 ms ([HCT] p.40) + margin */
@@ -223,11 +228,13 @@ static bool drdy_is_ready(void)
 	return gpio_pin_get_dt(&drdy) == 1;
 }
 
-/* Poll DRDY every 1 ms until it shows `want_ready`. Returns the ms waited, or -ETIMEDOUT. */
-static int wait_for_drdy(bool want_ready, int timeout_ms)
+#define HCT6911_CONV_TIMEOUT_MS  500	/* one result takes ~120 ms ([HCT] p.19), so ~4x margin */
+
+/* Poll DRDY every 1 ms until the result is ready. Returns the ms waited, or -ETIMEDOUT. */
+static int wait_until_ready(int timeout_ms)
 {
 	for (int waited_ms = 0; waited_ms <= timeout_ms; waited_ms++) {
-		if (drdy_is_ready() == want_ready) {
+		if (drdy_is_ready()) {
 			return waited_ms;
 		}
 		k_msleep(1);
@@ -237,13 +244,13 @@ static int wait_for_drdy(bool want_ready, int timeout_ms)
 
 /*
  * Step 4.3: one single conversion ([HCT] p.25-26, Table 4-4/4-5, Fig 4-7).
- * CS is held LOW from the command until the data has been read. Every stage is checked:
+ * CS is held LOW from the start command until the result has been read.
  *   1. before start: DOUT is HIGH (idle, R82 pull-up)
  *   2. send CMD_SINGLE_CONVERSION (0x80) = "start measuring"
- *   3. DOUT goes HIGH: chip accepted the command and is converting
- *   4. DOUT goes LOW: conversion finished (~120 ms at 25 Hz, 3rd-order filter, [HCT] p.19)
- *   5. send CMD_READ_RESULT (0x42) = "send me the result", then clock in 24 data bits, CS high
- *   6. SYS_CONF0 CKS_ERR = 0: no command byte was rejected ([HCT] p.41)
+ *   3. wait for DOUT LOW = result ready (~120 ms at 25 Hz, 3rd-order filter, [HCT] p.19)
+ *   4. send CMD_READ_RESULT (0x42) = "send me the result", clock in 24 bits, CS HIGH
+ *   5. SYS_CONF0 CKS_ERR = 0: no command byte was rejected ([HCT] p.41)
+ * On failure: prints which step failed and returns a negative error code.
  */
 int hct6911_read_raw(int32_t *code)
 {
@@ -273,44 +280,35 @@ int hct6911_read_raw(int32_t *code)
 		return err;
 	}
 
-	/* 3. Chip must release DOUT (HIGH = busy) to show it started converting */
-	int start_ms = wait_for_drdy(false, 10);
+	/* 3. Wait for DOUT LOW = result ready */
+	int ready_ms = wait_until_ready(HCT6911_CONV_TIMEOUT_MS);
 
-	if (start_ms < 0) {
+	if (ready_ms < 0) {
 		spi_release_dt(&hct_conv);
-		printf("HCT6911 step 3 FAILED: DOUT never went HIGH, conversion did not start\n");
-		return -EIO;
-	}
-
-	/* 4. Wait for DOUT LOW = conversion finished */
-	int done_ms = wait_for_drdy(true, 500);
-
-	if (done_ms < 0) {
-		spi_release_dt(&hct_conv);
-		printf("HCT6911 step 4 FAILED: conversion did not finish within 500 ms\n");
+		printf("HCT6911 step 3 FAILED: no result within %d ms\n", HCT6911_CONV_TIMEOUT_MS);
 		return -ETIMEDOUT;
 	}
 
-	/* 5. Send CMD_READ_RESULT and read the 24-bit result, then CS HIGH to end the frame */
+	/* 4. Send CMD_READ_RESULT and read the 24-bit result, then CS HIGH to end the frame */
 	err = spi_transceive_dt(&hct_conv, &tx_set, &rx_set);
 	spi_release_dt(&hct_conv);
 	if (err) {
-		printf("HCT6911 step 5 FAILED: SPI error %d reading data\n", err);
+		printf("HCT6911 step 4 FAILED: SPI error %d reading data\n", err);
 		return err;
 	}
 
-	/* 6. Did the chip reject any command byte? (reading SYS_CONF0 also clears the flag) */
+	/* 5. Did the chip reject any command byte? (reading SYS_CONF0 also clears the flag) */
 	uint32_t sys_conf0;
 
-	hct6911_read_reg(HCT6911_SYS_CONF0, HCT6911_REG_32BIT, &sys_conf0);
+	err = hct6911_read_reg(HCT6911_SYS_CONF0, HCT6911_REG_32BIT, &sys_conf0);
+	if (err) {
+		printf("HCT6911 step 5 FAILED: SPI error %d reading SYS_CONF0\n", err);
+		return err;
+	}
 	if (sys_conf0 & HCT6911_SYS_CONF0_CKS_ERR) {
-		printf("HCT6911 step 6 FAILED: CKS_ERR set, SYS_CONF0 = 0x%08X\n", sys_conf0);
+		printf("HCT6911 step 5 FAILED: CKS_ERR set, SYS_CONF0 = 0x%08X\n", sys_conf0);
 		return -EIO;
 	}
-
-	/* Bring-up debug: timing and raw bytes. Remove once readings are stable. */
-	printf("HCT6911 debug: busy after %d ms, ready after %d ms, rx = %02X %02X %02X %02X, SYS_CONF0 = 0x%08X\n",
-	       start_ms, done_ms, rx[0], rx[1], rx[2], rx[3], sys_conf0);
 
 	/* rx[0] arrived during the CMD_READ_RESULT byte: skip it.
 	 * Result is 24-bit signed, biggest byte first; bit 23 is the sign bit ([HCT] p.49).

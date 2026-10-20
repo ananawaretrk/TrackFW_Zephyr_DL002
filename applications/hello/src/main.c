@@ -10,6 +10,7 @@
 #include <zephyr/drivers/gpio.h>    /* GPIO / LED functions */
 #include <zephyr/bluetooth/bluetooth.h>
 #include "hct6911.h"                /* temperature ADC (PT100 front end) */
+#include "pt100.h"                  /* code -> ohm -> °C */
 
 /* LED pin info from the devicetree (dl002.dts) */
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
@@ -41,7 +42,6 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 
 int main(void)
 {
-	int count = 0;
 	bool green_on = false;
 
 	if (!gpio_is_ready_dt(&led_green) || !gpio_is_ready_dt(&led_red)) {
@@ -70,18 +70,15 @@ int main(void)
 
 	printf("Hello World! %s\n", CONFIG_BOARD_TARGET);
 
-	/* Step 3: can we talk to the temperature ADC? */
-	//hct6911_selftest();
+	/* Temperature ADC: init, reset, configure for the PT100.
+	 * Stops at the first failing step; that function prints why.
+	 */
+	bool adc_ready = (hct6911_init() == 0) &&
+			 (hct6911_reset() == 0) &&
+			 (hct6911_setup_pt100() == 0);
 
-	/* Step 4: init, reset, then configure for the PT100 */
-	if (hct6911_init() != 0) {
-		printf("HCT6911 init FAILED\n");
-	}
-	if (hct6911_reset() != 0) {
-		printf("HCT6911 reset FAILED\n");
-	}
-	if (hct6911_setup_pt100() != 0) {
-		printf("HCT6911 PT100 setup FAILED\n");
+	if (!adc_ready) {
+		printf("HCT6911 not ready: no temperature readings\n");
 	}
 
 	/* Start the Bluetooth stack (radio library, controller) */
@@ -105,25 +102,26 @@ int main(void)
 		gpio_pin_set_dt(&led_green, green_on);   /* green on...  */
 		gpio_pin_set_dt(&led_red, !green_on);    /* ...red is the opposite */
 
-		printf("Hello %d, %s\n", count, green_on ? "GREEN" : "RED");
-		count++;
-
 		/* Put the latest button count into the advertisement (not allowed from the interrupt) */
 		mfg_data[2] = (uint8_t)press_count;
 		bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
 
-		/* Step 4: one PT100 measurement */
-		int32_t pt100_code;
-		int pt100_err = hct6911_read_raw(&pt100_code);
+		if (adc_ready) {
+			int32_t pt100_code;
 
-		if (pt100_err) {
-			printf("PT100 read error %d\n", pt100_err);
-		} else {
-			/* R = code / gain / 2^23 * Rref, in milliohms (schematic formula) */
-			int64_t r_milliohm = (int64_t)pt100_code * 1620000 / (8LL * 8388608);
+			/* on failure, hct6911_read_raw() has already printed which step failed */
+			if (hct6911_read_raw(&pt100_code) == 0) {
+				float r_ohm = pt100_code_to_ohm(pt100_code);
+				float temp_c = pt100_ohm_to_celsius(r_ohm);
 
-			printf("PT100 code = %d, R = %d.%03d ohm\n", pt100_code,
-			       (int)(r_milliohm / 1000), (int)(r_milliohm % 1000));
+				if (temp_c < PT100_MIN_CELSIUS || temp_c > PT100_MAX_CELSIUS) {
+					printf("PT100 out of range: R = %.3f ohm (probe unplugged or shorted?)\n",
+					       (double)r_ohm);
+				} else {
+					/* printf takes doubles: (double) makes the float -> double step explicit */
+					printf("PT100 R = %.3f ohm, T = %.2f C\n", (double)r_ohm, (double)temp_c);
+				}
+			}
 		}
 
 		k_msleep(500);

@@ -6,8 +6,11 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>                 /* INT16_MIN */
+#include <math.h>                   /* lroundf() */
 #include <zephyr/kernel.h>          /* k_msleep() */
 #include <zephyr/drivers/gpio.h>    /* GPIO / LED functions */
+#include <zephyr/sys/byteorder.h>   /* sys_put_be16() */
 #include <zephyr/bluetooth/bluetooth.h>
 #include "hct6911.h"                /* temperature ADC (PT100 front end) */
 #include "pt100.h"                  /* code -> ohm -> °C */
@@ -24,8 +27,16 @@ static struct gpio_callback button_cb;
 
 static volatile int press_count;
 
-/* Manufacturer data: company 0xFFFF (test only, not shippable) + 1 byte press count */
-static uint8_t mfg_data[] = { 0xFF, 0xFF, 0x00 };
+/* Manufacturer data, 10 bytes, as seen in nRF Connect:
+ * FF FF             company 0xFFFF (test only, not shippable)
+ * D4 4A 85 BF 3E 17 MAC, same order as the boot log
+ * 09 24             temperature, int16 big-endian, 0.01 °C (0x0924 = 2340 = 23.40 °C)
+ */
+#define MFG_MAC_OFFSET   2
+#define MFG_TEMP_OFFSET  8
+#define TEMP_NO_READING  INT16_MIN   /* 0x8000: no valid reading */
+
+static uint8_t mfg_data[10] = { 0xFF, 0xFF, [MFG_TEMP_OFFSET] = 0x80 };   /* temp starts as 0x8000 */
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
@@ -89,6 +100,22 @@ int main(void)
 	}
 	printf("Bluetooth initialized\n");
 
+	/* Our own (identity) address, e.g. D4:4A:85:BF:3E:17 (public) */
+	bt_addr_le_t identity_address;
+	size_t identity_count = 1;
+	char address_text[BT_ADDR_LE_STR_LEN];
+
+	bt_id_get(&identity_address, &identity_count);
+	bt_addr_le_to_str(&identity_address, address_text, sizeof(address_text));
+	printf("Bluetooth address %s\n", address_text);
+
+	/* Copy the MAC into the advertisement. Zephyr stores it reversed, so val[5] goes first
+	 * to make it read the same as the boot log.
+	 */
+	for (int byte_index = 0; byte_index < 6; byte_index++) {
+		mfg_data[MFG_MAC_OFFSET + byte_index] = identity_address.a.val[5 - byte_index];
+	}
+
 	/* Advertise forever: non-connectable, fixed (identity) address, every 100-150 ms */
 	err = bt_le_adv_start(BT_LE_ADV_NCONN_IDENTITY, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {
@@ -102,9 +129,8 @@ int main(void)
 		gpio_pin_set_dt(&led_green, green_on);   /* green on...  */
 		gpio_pin_set_dt(&led_red, !green_on);    /* ...red is the opposite */
 
-		/* Put the latest button count into the advertisement (not allowed from the interrupt) */
-		mfg_data[2] = (uint8_t)press_count;
-		bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
+		/* Stays 0x8000 unless we get a valid reading below */
+		int16_t temp_centi_celsius = TEMP_NO_READING;
 
 		if (adc_ready) {
 			int32_t pt100_code;
@@ -120,9 +146,16 @@ int main(void)
 				} else {
 					/* printf takes doubles: (double) makes the float -> double step explicit */
 					printf("PT100 R = %.3f ohm, T = %.2f C\n", (double)r_ohm, (double)temp_c);
+
+					/* 23.40 °C -> 2340 (rounded, so 23.3999 doesn't become 2339) */
+					temp_centi_celsius = (int16_t)lroundf(temp_c * 100.0f);
 				}
 			}
 		}
+
+		/* Put the temperature into the advertisement (big-endian: 2340 -> 09 24) */
+		sys_put_be16((uint16_t)temp_centi_celsius, &mfg_data[MFG_TEMP_OFFSET]);
+		bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
 
 		k_msleep(500);
 	}

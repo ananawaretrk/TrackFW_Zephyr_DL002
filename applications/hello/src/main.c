@@ -36,6 +36,15 @@ static volatile int press_count;
 #define MFG_TEMP_OFFSET  8
 #define TEMP_NO_READING  INT16_MIN   /* 0x8000: no valid reading */
 
+/* Each cycle: read the temperature, start advertising (an alarm stops it after
+ * ADV_DURATION_MS), sleep ADV_CYCLE_MS
+ */
+#define ADV_INTERVAL_MS  20     /* time between packets while advertising (BLE min 20 ms) */
+#define ADV_DURATION_MS  100    /* how long we advertise each cycle */
+#define ADV_CYCLE_MS     5000   /* start of one cycle to the start of the next (+ reading time) */
+
+BUILD_ASSERT(ADV_DURATION_MS < ADV_CYCLE_MS, "advertising must be shorter than the cycle");
+
 static uint8_t mfg_data[10] = { 0xFF, 0xFF, [MFG_TEMP_OFFSET] = 0x80 };   /* temp starts as 0x8000 */
 
 static const struct bt_data ad[] = {
@@ -51,16 +60,56 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 	printk("BUTTON pressed! (%d)\n", press_count);
 }
 
+/* Runs ADV_DURATION_MS after advertising starts (same idea as AL300's stop_adv_wk): radio off */
+static void stop_adv_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	bt_le_adv_stop();
+}
+
+static K_WORK_DELAYABLE_DEFINE(stop_adv_work, stop_adv_handler);
+
+/* Wake the HCT6911, turn the excitation current back on (setup_pt100), take one reading and put
+ * it back to sleep. Returns the temperature in 0.01 °C, or TEMP_NO_READING on any failure
+ * (the function that failed has already printed why).
+ */
+static int16_t read_temperature(void)
+{
+	int32_t pt100_code;
+	bool reading_ok = (hct6911_wake() == 0) &&
+			  (hct6911_setup_pt100() == 0) &&
+			  (hct6911_read_raw(&pt100_code) == 0);
+
+	/* Back to sleep (< 1 uA) even if the reading failed */
+	hct6911_sleep();
+
+	if (!reading_ok) {
+		return TEMP_NO_READING;
+	}
+
+	float r_ohm = pt100_code_to_ohm(pt100_code);
+	float temp_c = pt100_ohm_to_celsius(r_ohm);
+
+	if (temp_c < PT100_MIN_CELSIUS || temp_c > PT100_MAX_CELSIUS) {
+		printf("PT100 out of range: R = %.3f ohm (probe unplugged or shorted?)\n", (double)r_ohm);
+		return TEMP_NO_READING;
+	}
+
+	/* printf takes doubles: (double) makes the float -> double step explicit */
+	printf("PT100 R = %.3f ohm, T = %.2f C\n", (double)r_ohm, (double)temp_c);
+
+	/* 23.40 °C -> 2340 (rounded, so 23.3999 doesn't become 2339) */
+	return (int16_t)lroundf(temp_c * 100.0f);
+}
+
 int main(void)
 {
-	bool green_on = false;
-
 	if (!gpio_is_ready_dt(&led_green) || !gpio_is_ready_dt(&led_red)) {
 		printf("LED GPIO not ready\n");
 		return 0;
 	}
 
-	/* Both pins are outputs, both LEDs start off */
+	/* Both pins are outputs, both LEDs off (each one lit costs mA) */
 	gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
 	gpio_pin_configure_dt(&led_red, GPIO_OUTPUT_INACTIVE);
 
@@ -81,12 +130,14 @@ int main(void)
 
 	printf("Hello World! %s\n", CONFIG_BOARD_TARGET);
 
-	/* Temperature ADC: init, reset, configure for the PT100.
+	/* Temperature ADC (powered from boot, see adc_3v3 in dl002.dts): init, reset, configure
+	 * for the PT100, then sleep until the first reading.
 	 * Stops at the first failing step; that function prints why.
 	 */
 	bool adc_ready = (hct6911_init() == 0) &&
 			 (hct6911_reset() == 0) &&
-			 (hct6911_setup_pt100() == 0);
+			 (hct6911_setup_pt100() == 0) &&
+			 (hct6911_sleep() == 0);
 
 	if (!adc_ready) {
 		printf("HCT6911 not ready: no temperature readings\n");
@@ -116,48 +167,34 @@ int main(void)
 		mfg_data[MFG_MAC_OFFSET + byte_index] = identity_address.a.val[5 - byte_index];
 	}
 
-	/* Advertise forever: non-connectable, fixed (identity) address, every 100-150 ms */
-	err = bt_le_adv_start(BT_LE_ADV_NCONN_IDENTITY, ad, ARRAY_SIZE(ad), NULL, 0);
-	if (err) {
-		printf("Advertising failed to start (err %d)\n", err);
-		return 0;
-	}
-	printf("Advertising as %s\n", CONFIG_BT_DEVICE_NAME);
+	printf("Advertising as %s: %d ms (packet every %d ms) every %d ms\n", CONFIG_BT_DEVICE_NAME,
+	       ADV_DURATION_MS, ADV_INTERVAL_MS, ADV_CYCLE_MS);
 
 	while (1) {
-		green_on = !green_on;
-		gpio_pin_set_dt(&led_green, green_on);   /* green on...  */
-		gpio_pin_set_dt(&led_red, !green_on);    /* ...red is the opposite */
-
 		/* Stays 0x8000 unless we get a valid reading below */
 		int16_t temp_centi_celsius = TEMP_NO_READING;
 
 		if (adc_ready) {
-			int32_t pt100_code;
-
-			/* on failure, hct6911_read_raw() has already printed which step failed */
-			if (hct6911_read_raw(&pt100_code) == 0) {
-				float r_ohm = pt100_code_to_ohm(pt100_code);
-				float temp_c = pt100_ohm_to_celsius(r_ohm);
-
-				if (temp_c < PT100_MIN_CELSIUS || temp_c > PT100_MAX_CELSIUS) {
-					printf("PT100 out of range: R = %.3f ohm (probe unplugged or shorted?)\n",
-					       (double)r_ohm);
-				} else {
-					/* printf takes doubles: (double) makes the float -> double step explicit */
-					printf("PT100 R = %.3f ohm, T = %.2f C\n", (double)r_ohm, (double)temp_c);
-
-					/* 23.40 °C -> 2340 (rounded, so 23.3999 doesn't become 2339) */
-					temp_centi_celsius = (int16_t)lroundf(temp_c * 100.0f);
-				}
-			}
+			temp_centi_celsius = read_temperature();
 		}
 
 		/* Put the temperature into the advertisement (big-endian: 2340 -> 09 24) */
 		sys_put_be16((uint16_t)temp_centi_celsius, &mfg_data[MFG_TEMP_OFFSET]);
-		bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
 
-		k_msleep(500);
+		/* Start advertising: non-connectable, fixed identity address, one packet every ADV_INTERVAL_MS */
+		err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_USE_IDENTITY,
+						      BT_GAP_MS_TO_ADV_INTERVAL(ADV_INTERVAL_MS),
+						      BT_GAP_MS_TO_ADV_INTERVAL(ADV_INTERVAL_MS), NULL),
+				      ad, ARRAY_SIZE(ad), NULL, 0);
+		if (err) {
+			printf("Advertising failed to start (err %d)\n", err);
+		} else {
+			/* Alarm: stop advertising after ADV_DURATION_MS */
+			k_work_schedule(&stop_adv_work, K_MSEC(ADV_DURATION_MS));
+		}
+
+		/* The alarm stops advertising during this sleep; CONFIG_PM puts the chip in EM2 */
+		k_msleep(ADV_CYCLE_MS);
 	}
 
 	return 0;

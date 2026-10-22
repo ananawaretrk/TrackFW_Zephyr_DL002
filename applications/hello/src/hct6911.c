@@ -11,6 +11,11 @@
 #include <zephyr/sys/byteorder.h>	/* sys_get_be24/32, sys_put_be24/32 */
 #include "hct6911.h"
 
+/* Timing */
+#define HCT6911_RESET_WAIT_MS    15	/* reset takes 10 ms ([HCT] p.40) + margin */
+#define HCT6911_WAKE_US          200	/* wait after POWD=0 before a conversion ([HCT] p.20) */
+#define HCT6911_CONV_TIMEOUT_MS  500	/* one result takes ~120 ms ([HCT] p.19), so ~4x margin */
+
 /* SPI mode 0 (no CPOL/CPHA flags): SCLK idles low, sampled on rising edge ([HCT] p.31-32) */
 static const struct spi_dt_spec hct = SPI_DT_SPEC_GET(DT_NODELABEL(hct6911),
 						      SPI_WORD_SET(8) | SPI_TRANSFER_MSB);
@@ -120,8 +125,6 @@ int hct6911_init(void)
 	return err;
 }
 
-#define HCT6911_RESET_WAIT_MS  15	/* reset takes 10 ms ([HCT] p.40) + margin */
-
 /* Step 4.1: global reset. Write 1 to SYS_CONF0 bit 31 RS_SYS; it clears itself after 10 ms
  * ([HCT] p.40, Table 5-6; procedure step 1 on p.60).
  * On failure: prints why and returns a negative error code.
@@ -213,8 +216,37 @@ int hct6911_setup_pt100(void)
 	}
 
 	err = write_reg32_and_verify(HCT6911_SYS_CONF2, sys_conf2);
+
+	return err;
+}
+
+/* Sleep, < 1 uA ([HCT] §3.12 p.20). The datasheet doesn't list the excitation current as switched
+ * off by POWD, so set IDAC0 to 0 uA first (§3.7 p.18). Registers are kept while asleep.
+ */
+int hct6911_sleep(void)
+{
+	int err = write_reg32_and_verify(HCT6911_SYS_CONF2, 0);	/* IDAC0 = 0 uA */
+
+	if (err) {
+		return err;
+	}
+	err = write_reg32_and_verify(HCT6911_SYS_CONF1, HCT6911_SYS_CONF1_POWD);
 	
 	return err;
+}
+
+/* Wake up: POWD = 0, then wait before converting ([HCT] p.20).
+ * hct6911_setup_pt100() turns the 1 mA excitation current back on.
+ */
+int hct6911_wake(void)
+{
+	int err = write_reg32_and_verify(HCT6911_SYS_CONF1, 0);
+
+	if (err) {
+		return err;
+	}
+	k_busy_wait(HCT6911_WAKE_US);
+	return 0;
 }
 
 /*
@@ -227,8 +259,6 @@ static bool drdy_is_ready(void)
 {
 	return gpio_pin_get_dt(&drdy) == 1;
 }
-
-#define HCT6911_CONV_TIMEOUT_MS  500	/* one result takes ~120 ms ([HCT] p.19), so ~4x margin */
 
 /* Poll DRDY every 1 ms until the result is ready. Returns the ms waited, or -ETIMEDOUT. */
 static int wait_until_ready(int timeout_ms)

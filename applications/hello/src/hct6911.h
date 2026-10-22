@@ -10,6 +10,7 @@
 #define HCT6911_D_TARG     0x10	/* 24 bit, R/W, default 0x7FFFFF */
 #define HCT6911_CONV_CONF0 0x11	/* 32 bit, R/W, default 0x00000000 */
 #define HCT6911_SYS_CONF0  0x1B	/* 32 bit, R/W, default 0x00008000 */
+#define HCT6911_SYS_CONF1  0x1C	/* 32 bit, R/W, default 0x00000000 */
 #define HCT6911_SYS_CONF2  0x1D	/* 32 bit, R/W, default 0x00000000 */
 
 /* Register sizes in bytes ([HCT] p.33-34, Table 5-1) */
@@ -25,6 +26,7 @@
 #define HCT6911_SYS_CONF0_RS_SYS   BIT(31)	/* write 1 = start reset; reads 1 while resetting */
 #define HCT6911_SYS_CONF0_RS_V     BIT(15)	/* 1 = last reset succeeded */
 #define HCT6911_SYS_CONF0_CKS_ERR  BIT(10)	/* 1 = a command byte was rejected (parity/CRC) */
+#define HCT6911_SYS_CONF1_POWD     BIT(15)	/* 1 = sleep, < 1 uA ([HCT] p.20, p.44) */
 
 int hct6911_read_reg(uint8_t addr, int nbytes, uint32_t *value);
 int hct6911_write_reg(uint8_t addr, int nbytes, uint32_t value);
@@ -33,5 +35,7 @@ int hct6911_init(void);
 int hct6911_reset(void);
 int hct6911_setup_pt100(void);
 int hct6911_read_raw(int32_t *code);
+int hct6911_sleep(void);
+int hct6911_wake(void);
 
 #endif

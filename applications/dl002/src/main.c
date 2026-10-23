@@ -1,9 +1,3 @@
-/*
- * Copyright (c) 2012-2014 Wind River Systems, Inc.
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>                 /* INT16_MIN */
@@ -57,7 +51,6 @@ static const struct bt_data ad[] = {
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	press_count++;
-	printk("BUTTON pressed! (%d)\n", press_count);
 }
 
 /* Runs ADV_DURATION_MS after advertising starts (same idea as AL300's stop_adv_wk): radio off */
@@ -128,11 +121,14 @@ int main(void)
 	gpio_init_callback(&button_cb, button_pressed, BIT(button.pin));
 	gpio_add_callback(button.port, &button_cb);
 
-	/* Temperature ADC (powered from boot, see adc_3v3 in dl002.dts): init, reset, configure
-	 * for the PT100, then sleep until the first reading.
+	/* Temperature ADC (powered from boot, see adc_3v3 in dl002.dts): init, wake, reset,
+	 * configure for the PT100, then sleep until the first reading.
+	 * Wake first: after a reset without a power cycle (e.g. flashing), the HCT6911 can still be
+	 * asleep from the previous run, and a sleeping HCT6911 ignores a reset ([HCT] p.20).
 	 * Stops at the first failing step; that function prints why.
 	 */
 	bool adc_ready = (hct6911_init() == 0) &&
+			 (hct6911_wake() == 0) &&
 			 (hct6911_reset() == 0) &&
 			 (hct6911_setup_pt100() == 0) &&
 			 (hct6911_sleep() == 0);

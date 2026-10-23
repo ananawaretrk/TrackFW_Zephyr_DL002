@@ -1,7 +1,6 @@
 /*
- * HCT6911 24-bit ADC: SPI register access + PT100 measurement (bring-up steps 3 and 4).
- * [HCT] = HCT6911 datasheet, printed page numbers
- *         (English pages: HCT6911_datasheet_EN_selected_pages.pdf).
+ * HCT6911 24-bit ADC: SPI register access, PT100 configuration and measurement, sleep/wake.
+ * [HCT] = HCT6911 datasheet, printed page numbers (English translation: HCT6911_datasheet_EN_full.pdf).
  */
 
 #include <stdio.h>

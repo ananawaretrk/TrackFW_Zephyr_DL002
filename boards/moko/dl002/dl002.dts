@@ -78,6 +78,38 @@
 	status = "okay";
 };
 
+/* [SCH] X2 32.768 kHz, C92/C30 = 18 pF to GND (part number not on the schematic).
+ * Load: [DS] p.53 Table 4.26: on-chip tuning cap 4 pF per pin at CAPTUNE = 0, seen in series (half);
+ * crystals above 12 pF need external caps -> almost certainly a 12.5 pF crystal:
+ * 18/2 (external) + 4/2 (on-chip at ctune 0) + ~1.5 (board) ~= 12.5 pF -> ctune = 0.
+ * Slow clocks from this crystal instead of the internal LFRCO (+-3 %), like AL300 and the Silabs boards.
+ */
+&lfxo {
+	ctune = <0>;
+	precision = <50>;
+	status = "okay";
+};
+
+&em23grpaclk {
+	clocks = <&lfxo>;
+};
+
+&em4grpaclk {
+	clocks = <&lfxo>;
+};
+
+&prortcclk {
+	clocks = <&lfxo>;
+};
+
+&rtccclk {
+	clocks = <&lfxo>;
+};
+
+&wdog0clk {
+	clocks = <&lfxo>;
+};
+
 /* 38.4 MHz * (3839 + 1) / (1919 + 1) = 76.8 MHz. Settings from the dev kit. */
 &hfrcodpll {
 	clock-frequency = <DT_FREQ_K(76800)>;

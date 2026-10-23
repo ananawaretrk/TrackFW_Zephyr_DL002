@@ -128,8 +128,6 @@ int main(void)
 	gpio_init_callback(&button_cb, button_pressed, BIT(button.pin));
 	gpio_add_callback(button.port, &button_cb);
 
-	printf("Hello World! %s\n", CONFIG_BOARD_TARGET);
-
 	/* Temperature ADC (powered from boot, see adc_3v3 in dl002.dts): init, reset, configure
 	 * for the PT100, then sleep until the first reading.
 	 * Stops at the first failing step; that function prints why.

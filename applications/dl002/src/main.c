@@ -21,13 +21,21 @@ static struct gpio_callback button_cb;
 
 static volatile int press_count;
 
-/* Manufacturer data, 10 bytes, as seen in nRF Connect:
- * FF FF             company 0xFFFF (test only, not shippable)
+/* Manufacturer data, 12 bytes, as seen in nRF Connect:
+ * F7 0E             company 0x0EF7 "Trackonomy Systems, Inc." (little-endian, set by the Bluetooth spec)
+ * 52 58             Trackonomy marker (same as AL300)
  * D4 4A 85 BF 3E 17 MAC, same order as the boot log
  * 09 24             temperature, int16 big-endian, 0.01 °C (0x0924 = 2340 = 23.40 °C)
  */
-#define MFG_MAC_OFFSET   2
-#define MFG_TEMP_OFFSET  8
+#define TRACKONOMY_COMPANY_ID  0x0EF7
+#define TRACKONOMY_MARKER      0x5258
+
+#define MFG_COMPANY_OFFSET  0
+#define MFG_MARKER_OFFSET   (MFG_COMPANY_OFFSET + sizeof(uint16_t))
+#define MFG_MAC_OFFSET      (MFG_MARKER_OFFSET + sizeof(uint16_t))
+#define MFG_TEMP_OFFSET     (MFG_MAC_OFFSET + BT_ADDR_SIZE)
+#define MFG_DATA_LEN        (MFG_TEMP_OFFSET + sizeof(int16_t))
+
 #define TEMP_NO_READING  INT16_MIN   /* 0x8000: no valid reading */
 
 /* Each cycle: read the temperature, start advertising (an alarm stops it after
@@ -39,11 +47,18 @@ static volatile int press_count;
 
 BUILD_ASSERT(ADV_DURATION_MS < ADV_CYCLE_MS, "advertising must be shorter than the cycle");
 
-static uint8_t mfg_data[10] = { 0xFF, 0xFF, [MFG_TEMP_OFFSET] = 0x80 };   /* temp starts as 0x8000 */
+#define ADV_TX_POWER_DBM  0    /* radio output power (BG22 max +6 dBm) */
+#define DECI_DBM_PER_DBM  10    /* the Silabs library counts power in 0.1 dBm steps */
+
+/* In the Silabs Bluetooth library, but not in any header: Zephyr's driver declares it the
+ * same way (zephyr/drivers/bluetooth/hci/hci_silabs_efr32.c). Returns the power actually set.
+ */
+int16_t BTLE_LL_SetMaxPower(int16_t power);
+
+static uint8_t mfg_data[MFG_DATA_LEN];   /* filled in main() before the first advertisement */
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
-	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
 };
 
@@ -61,6 +76,23 @@ static void stop_adv_handler(struct k_work *work)
 }
 
 static K_WORK_DELAYABLE_DEFINE(stop_adv_work, stop_adv_handler);
+
+/* Set the Bluetooth TX power. The Silabs library returns the power it actually set (the
+ * nearest level the radio supports), so we compare that with what we asked for.
+ * Call after bt_enable(). Returns 0 if it matches, -ERANGE if the radio uses a different level.
+ */
+static int ble_set_tx_power(int8_t requested_dbm)
+{
+	int16_t set_deci_dbm = BTLE_LL_SetMaxPower(requested_dbm * DECI_DBM_PER_DBM);
+	int set_dbm = DIV_ROUND_CLOSEST(set_deci_dbm, DECI_DBM_PER_DBM);
+
+	if (set_dbm != requested_dbm) {
+		printf("TX power FAILED: requested %d dBm, radio uses %d dBm\n", requested_dbm, set_dbm);
+		return -ERANGE;
+	}
+	printf("TX power %d dBm\n", set_dbm);
+	return 0;
+}
 
 /* Wake the HCT6911, turn the excitation current back on (setup_pt100), take one reading and put
  * it back to sleep. Returns the temperature in 0.01 °C, or TEMP_NO_READING on any failure
@@ -145,6 +177,8 @@ int main(void)
 	}
 	printf("Bluetooth initialized\n");
 
+	ble_set_tx_power(ADV_TX_POWER_DBM);   /* on failure it prints what the radio uses instead */
+
 	/* Our own (identity) address, e.g. D4:4A:85:BF:3E:17 (public) */
 	bt_addr_le_t identity_address;
 	size_t identity_count = 1;
@@ -154,14 +188,18 @@ int main(void)
 	bt_addr_le_to_str(&identity_address, address_text, sizeof(address_text));
 	printf("Bluetooth address %s\n", address_text);
 
+	/* Fixed part of the advertisement: company ID (little-endian, Bluetooth spec), then the marker */
+	sys_put_le16(TRACKONOMY_COMPANY_ID, &mfg_data[MFG_COMPANY_OFFSET]);
+	sys_put_be16(TRACKONOMY_MARKER, &mfg_data[MFG_MARKER_OFFSET]);
+
 	/* Copy the MAC into the advertisement. Zephyr stores it reversed, so val[5] goes first
 	 * to make it read the same as the boot log.
 	 */
-	for (int byte_index = 0; byte_index < 6; byte_index++) {
-		mfg_data[MFG_MAC_OFFSET + byte_index] = identity_address.a.val[5 - byte_index];
+	for (int byte_index = 0; byte_index < BT_ADDR_SIZE; byte_index++) {
+		mfg_data[MFG_MAC_OFFSET + byte_index] = identity_address.a.val[BT_ADDR_SIZE - 1 - byte_index];
 	}
 
-	printf("Advertising as %s: %d ms (packet every %d ms) every %d ms\n", CONFIG_BT_DEVICE_NAME,
+	printf("Advertising %d ms (packet every %d ms) every %d ms\n",
 	       ADV_DURATION_MS, ADV_INTERVAL_MS, ADV_CYCLE_MS);
 
 	while (1) {

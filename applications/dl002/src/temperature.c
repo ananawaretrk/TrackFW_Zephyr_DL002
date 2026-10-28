@@ -3,13 +3,15 @@
  * Gives the temperature in 0.01 °C, or TEMP_NO_READING.
  */
 
-#include <stdio.h>
+#include <zephyr/logging/log.h>
 #include <stdbool.h>
 #include <errno.h>       /* EIO */
 #include <math.h>        /* lroundf() */
 #include "hct6911.h"     /* temperature ADC (PT100 front end) */
 #include "pt100.h"       /* code -> ohm -> °C */
 #include "temperature.h"
+
+LOG_MODULE_REGISTER(temperature);
 
 static bool adc_ready;   /* false until temperature_init() succeeds */
 
@@ -30,7 +32,7 @@ int temperature_init(void)
 		    (hct6911_sleep() == 0);
 
 	if (!adc_ready) {
-		printf("HCT6911 not ready: no temperature readings\n");
+		LOG_ERR("HCT6911 not ready: no temperature readings");
 		return -EIO;
 	}
 	return 0;
@@ -62,12 +64,12 @@ int16_t temperature_read(void)
 	float temp_c = pt100_ohm_to_celsius(r_ohm);
 
 	if (temp_c < PT100_MIN_CELSIUS || temp_c > PT100_MAX_CELSIUS) {
-		printf("PT100 out of range: R = %.3f ohm (probe unplugged or shorted?)\n", (double)r_ohm);
+		LOG_WRN("PT100 out of range: R = %.3f ohm (probe unplugged or shorted?)", (double)r_ohm);
 		return TEMP_NO_READING;
 	}
 
-	/* printf takes doubles: (double) makes the float -> double step explicit */
-	printf("PT100 R = %.3f ohm, T = %.2f C\n", (double)r_ohm, (double)temp_c);
+	/* %f expects a double: (double) makes the float -> double step explicit */
+	LOG_INF("PT100 R = %.3f ohm, T = %.2f C", (double)r_ohm, (double)temp_c);
 
 	/* 23.40 °C -> 2340 (rounded, so 23.3999 doesn't become 2339) */
 	return (int16_t)lroundf(temp_c * 100.0f);

@@ -3,14 +3,17 @@
  * DL002_ADV_DURATION_MS at a time.
  */
 
-#include <stdio.h>
+#include <zephyr/logging/log.h>
 #include <stdint.h>
+#include <errno.h>                  /* ENOENT */
 #include <zephyr/kernel.h>          /* k_work_schedule() */
 #include <zephyr/sys/byteorder.h>   /* sys_put_be16(), sys_put_le16() */
 #include <zephyr/sys/util.h>        /* MIN() */
 #include <zephyr/bluetooth/bluetooth.h>
 #include "app_config.h"             /* DL002_ADV_* settings */
 #include "ble.h"
+
+LOG_MODULE_REGISTER(ble);
 
 /* Manufacturer data, 12 bytes, as seen in nRF Connect:
  * F7 0E             company 0x0EF7 "Trackonomy Systems, Inc." (little-endian, set by the Bluetooth spec)
@@ -50,7 +53,12 @@ static const struct bt_data ad[] = {
 static void stop_adv_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	bt_le_adv_stop();
+
+	int err = bt_le_adv_stop();
+
+	if (err) {
+		LOG_ERR("Advertising failed to stop (err %d)", err);
+	}
 }
 
 static K_WORK_DELAYABLE_DEFINE(stop_adv_work, stop_adv_handler);
@@ -64,18 +72,18 @@ static void ble_set_tx_power(int8_t requested_dbm)
 	int8_t allowed_dbm = MIN(requested_dbm, TX_POWER_MAX_DBM);
 
 	if (allowed_dbm != requested_dbm) {
-		printf("TX power %d dBm is above the %d dBm limit, using %d dBm\n",
-		       requested_dbm, TX_POWER_MAX_DBM, allowed_dbm);
+		LOG_WRN("TX power %d dBm is above the %d dBm limit, using %d dBm",
+		        requested_dbm, TX_POWER_MAX_DBM, allowed_dbm);
 	}
 
 	int16_t set_deci_dbm = BTLE_LL_SetMaxPower(allowed_dbm * DECI_DBM_PER_DBM);
 
-	printf("TX power: requested %d dBm, radio uses %.1f dBm\n",
-	       allowed_dbm, (double)set_deci_dbm / DECI_DBM_PER_DBM);
+	LOG_INF("TX power: requested %d dBm, radio uses %.1f dBm",
+	        allowed_dbm, (double)set_deci_dbm / DECI_DBM_PER_DBM);
 }
 
 /* Start the Bluetooth stack, set the TX power and fill the fixed part of the advertisement
- * (company ID, marker, MAC). Returns 0, or the bt_enable() error.
+ * (company ID, marker, MAC). Returns 0, the bt_enable() error, or -ENOENT if there is no address.
  */
 int ble_init(void)
 {
@@ -83,10 +91,10 @@ int ble_init(void)
 	int err = bt_enable(NULL);
 
 	if (err) {
-		printf("Bluetooth init failed (err %d)\n", err);
+		LOG_ERR("Bluetooth init failed (err %d)", err);
 		return err;
 	}
-	printf("Bluetooth initialized\n");
+	LOG_INF("Bluetooth initialized");
 
 	ble_set_tx_power(DL002_ADV_TX_POWER_DBM);   /* prints the power the radio actually uses */
 
@@ -96,8 +104,12 @@ int ble_init(void)
 	char address_text[BT_ADDR_LE_STR_LEN];
 
 	bt_id_get(&identity_address, &identity_count);
+	if (identity_count == 0) {
+		LOG_ERR("Bluetooth address FAILED: no identity address");
+		return -ENOENT;
+	}
 	bt_addr_le_to_str(&identity_address, address_text, sizeof(address_text));
-	printf("Bluetooth address %s\n", address_text);
+	LOG_INF("Bluetooth address %s", address_text);
 
 	/* Fixed part of the advertisement: company ID (little-endian, Bluetooth spec), then the marker */
 	sys_put_le16(TRACKONOMY_COMPANY_ID, &mfg_data[MFG_COMPANY_OFFSET]);
@@ -132,7 +144,7 @@ int ble_adv_start(void)
 				  ad, ARRAY_SIZE(ad), NULL, 0);
 
 	if (err) {
-		printf("Advertising failed to start (err %d)\n", err);
+		LOG_ERR("Advertising failed to start (err %d)", err);
 		return err;
 	}
 

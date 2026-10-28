@@ -1,10 +1,12 @@
-#include <stdio.h>
+#include <zephyr/logging/log.h>
 #include <stdint.h>
 #include <zephyr/kernel.h>          /* k_msleep() */
 #include <zephyr/drivers/gpio.h>    /* GPIO / LED functions */
 #include "app_config.h"             /* DL002_ADV_* settings */
 #include "temperature.h"            /* temperature_init(), temperature_read() */
 #include "ble.h"                    /* ble_init(), ble_set_temperature(), ble_adv_start() */
+
+LOG_MODULE_REGISTER(main);
 
 /* LED pin info from the devicetree (dl002.dts) */
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
@@ -27,16 +29,24 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 int main(void)
 {
 	if (!gpio_is_ready_dt(&led_green) || !gpio_is_ready_dt(&led_red)) {
-		printf("LED GPIO not ready\n");
+		LOG_ERR("LED GPIO not ready");
 		return 0;
 	}
 
 	/* Both pins are outputs, both LEDs off (each one lit costs mA) */
-	gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
-	gpio_pin_configure_dt(&led_red, GPIO_OUTPUT_INACTIVE);
+	int err = gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
+
+	if (err) {
+		LOG_ERR("Green LED pin configure FAILED (err %d)", err);
+	}
+
+	err = gpio_pin_configure_dt(&led_red, GPIO_OUTPUT_INACTIVE);
+	if (err) {
+		LOG_ERR("Red LED pin configure FAILED (err %d)", err);
+	}
 
 	if (!gpio_is_ready_dt(&button)) {
-		printf("Button GPIO not ready\n");
+		LOG_ERR("Button GPIO not ready");
 		return 0;
 	}
 
@@ -58,8 +68,8 @@ int main(void)
 		return 0;
 	}
 
-	printf("Advertising %d ms (packet every %d ms) every %d ms\n",
-	       DL002_ADV_DURATION_MS, DL002_ADV_INTERVAL_MS, DL002_ADV_CYCLE_MS);
+	LOG_INF("Advertising %d ms (packet every %d ms) every %d ms",
+	        DL002_ADV_DURATION_MS, DL002_ADV_INTERVAL_MS, DL002_ADV_CYCLE_MS);
 
 	while (1) {
 		/* 0.01 °C, or TEMP_NO_READING (0x8000) if there is no valid reading */

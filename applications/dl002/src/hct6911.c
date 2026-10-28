@@ -3,12 +3,14 @@
  * [HCT] = HCT6911 datasheet, printed page numbers (English translation: HCT6911_datasheet_EN_full.pdf).
  */
 
-#include <stdio.h>
+#include <zephyr/logging/log.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/byteorder.h>	/* sys_get_be24/32, sys_put_be24/32 */
 #include "hct6911.h"
+
+LOG_MODULE_REGISTER(hct6911);
 
 /* Timing */
 #define HCT6911_RESET_WAIT_MS    15	/* reset takes 10 ms ([HCT] p.40) + margin */
@@ -109,17 +111,17 @@ int hct6911_write_reg(uint8_t addr, int nbytes, uint32_t value)
 int hct6911_init(void)
 {
 	if (!spi_is_ready_dt(&hct)) {
-		printf("HCT6911 init FAILED: SPI bus not ready\n");
+		LOG_ERR("init FAILED: SPI bus not ready");
 		return -ENODEV;
 	}
 	if (!gpio_is_ready_dt(&drdy)) {
-		printf("HCT6911 init FAILED: DRDY GPIO port not ready\n");
+		LOG_ERR("init FAILED: DRDY GPIO port not ready");
 		return -ENODEV;
 	}
 	int err = gpio_pin_configure_dt(&drdy, GPIO_INPUT);
 
 	if (err) {
-		printf("HCT6911 init FAILED: DRDY pin configure error %d\n", err);
+		LOG_ERR("init FAILED: DRDY pin configure error %d", err);
 	}
 	return err;
 }
@@ -135,14 +137,14 @@ int hct6911_reset(void)
 	int err = hct6911_write_reg(HCT6911_SYS_CONF0, HCT6911_REG_32BIT, HCT6911_SYS_CONF0_RS_SYS);
 
 	if (err) {
-		printf("HCT6911 reset FAILED: SPI error %d\n", err);
+		LOG_ERR("reset FAILED: SPI error %d", err);
 		return err;
 	}
 	k_msleep(HCT6911_RESET_WAIT_MS);
 
 	err = hct6911_read_reg(HCT6911_SYS_CONF0, HCT6911_REG_32BIT, &sys_conf0);
 	if (err) {
-		printf("HCT6911 reset FAILED: SPI error %d\n", err);
+		LOG_ERR("reset FAILED: SPI error %d", err);
 		return err;
 	}
 
@@ -150,7 +152,7 @@ int hct6911_reset(void)
 	bool reset_succeeded     = (sys_conf0 & HCT6911_SYS_CONF0_RS_V) != 0;
 
 	if (reset_still_running || !reset_succeeded) {
-		printf("HCT6911 reset FAILED: SYS_CONF0 = 0x%08X (expected 0x00008000)\n", sys_conf0);
+		LOG_ERR("reset FAILED: SYS_CONF0 = 0x%08X (expected 0x00008000)", sys_conf0);
 		return -EIO;
 	}
 	return 0;
@@ -166,17 +168,17 @@ static int write_reg32_and_verify(uint8_t addr, uint32_t value)
 	int err = hct6911_write_reg(addr, HCT6911_REG_32BIT, value);
 
 	if (err) {
-		printf("HCT6911 write register 0x%02X FAILED: SPI error %d\n", addr, err);
+		LOG_ERR("write register 0x%02X FAILED: SPI error %d", addr, err);
 		return err;
 	}
 	err = hct6911_read_reg(addr, HCT6911_REG_32BIT, &readback);
 	if (err) {
-		printf("HCT6911 read register 0x%02X FAILED: SPI error %d\n", addr, err);
+		LOG_ERR("read register 0x%02X FAILED: SPI error %d", addr, err);
 		return err;
 	}
 	if (readback != value) {
-		printf("HCT6911 register 0x%02X FAILED: read back 0x%08X, wrote 0x%08X\n",
-		       addr, readback, value);
+		LOG_ERR("register 0x%02X FAILED: read back 0x%08X, wrote 0x%08X",
+		        addr, readback, value);
 		return -EIO;
 	}
 	return 0;
@@ -296,7 +298,7 @@ int hct6911_read_raw(int32_t *code)
 
 	/* 1. Idle line must be HIGH before we start */
 	if (drdy_is_ready()) {
-		printf("HCT6911 step 1 FAILED: DOUT is LOW before start (expected HIGH)\n");
+		LOG_ERR("step 1 FAILED: DOUT is LOW before start (expected HIGH)");
 		return -EIO;
 	}
 
@@ -305,7 +307,7 @@ int hct6911_read_raw(int32_t *code)
 
 	if (err) {
 		spi_release_dt(&hct_conv);
-		printf("HCT6911 step 2 FAILED: SPI error %d sending the conversion command\n", err);
+		LOG_ERR("step 2 FAILED: SPI error %d sending the conversion command", err);
 		return err;
 	}
 
@@ -314,7 +316,7 @@ int hct6911_read_raw(int32_t *code)
 
 	if (ready_ms < 0) {
 		spi_release_dt(&hct_conv);
-		printf("HCT6911 step 3 FAILED: no result within %d ms\n", HCT6911_CONV_TIMEOUT_MS);
+		LOG_ERR("step 3 FAILED: no result within %d ms", HCT6911_CONV_TIMEOUT_MS);
 		return -ETIMEDOUT;
 	}
 
@@ -322,7 +324,7 @@ int hct6911_read_raw(int32_t *code)
 	err = spi_transceive_dt(&hct_conv, &tx_set, &rx_set);
 	spi_release_dt(&hct_conv);
 	if (err) {
-		printf("HCT6911 step 4 FAILED: SPI error %d reading data\n", err);
+		LOG_ERR("step 4 FAILED: SPI error %d reading data", err);
 		return err;
 	}
 
@@ -331,11 +333,11 @@ int hct6911_read_raw(int32_t *code)
 
 	err = hct6911_read_reg(HCT6911_SYS_CONF0, HCT6911_REG_32BIT, &sys_conf0);
 	if (err) {
-		printf("HCT6911 step 5 FAILED: SPI error %d reading SYS_CONF0\n", err);
+		LOG_ERR("step 5 FAILED: SPI error %d reading SYS_CONF0", err);
 		return err;
 	}
 	if (sys_conf0 & HCT6911_SYS_CONF0_CKS_ERR) {
-		printf("HCT6911 step 5 FAILED: CKS_ERR set, SYS_CONF0 = 0x%08X\n", sys_conf0);
+		LOG_ERR("step 5 FAILED: CKS_ERR set, SYS_CONF0 = 0x%08X", sys_conf0);
 		return -EIO;
 	}
 

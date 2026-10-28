@@ -1,13 +1,10 @@
 #include <stdio.h>
-#include <stdbool.h>
-#include <stdint.h>                 /* INT16_MIN */
-#include <math.h>                   /* lroundf() */
+#include <stdint.h>
 #include <zephyr/kernel.h>          /* k_msleep() */
 #include <zephyr/drivers/gpio.h>    /* GPIO / LED functions */
-#include <zephyr/sys/byteorder.h>   /* sys_put_be16() */
-#include <zephyr/bluetooth/bluetooth.h>
-#include "hct6911.h"                /* temperature ADC (PT100 front end) */
-#include "pt100.h"                  /* code -> ohm -> °C */
+#include "app_config.h"             /* DL002_ADV_* settings */
+#include "temperature.h"            /* temperature_init(), temperature_read() */
+#include "ble.h"                    /* ble_init(), ble_set_temperature(), ble_adv_start() */
 
 /* LED pin info from the devicetree (dl002.dts) */
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
@@ -21,110 +18,10 @@ static struct gpio_callback button_cb;
 
 static volatile int press_count;
 
-/* Manufacturer data, 12 bytes, as seen in nRF Connect:
- * F7 0E             company 0x0EF7 "Trackonomy Systems, Inc." (little-endian, set by the Bluetooth spec)
- * 52 58             Trackonomy marker (same as AL300)
- * D4 4A 85 BF 3E 17 MAC, same order as the boot log
- * 09 24             temperature, int16 big-endian, 0.01 °C (0x0924 = 2340 = 23.40 °C)
- */
-#define TRACKONOMY_COMPANY_ID  0x0EF7
-#define TRACKONOMY_MARKER      0x5258
-
-#define MFG_COMPANY_OFFSET  0
-#define MFG_MARKER_OFFSET   (MFG_COMPANY_OFFSET + sizeof(uint16_t))
-#define MFG_MAC_OFFSET      (MFG_MARKER_OFFSET + sizeof(uint16_t))
-#define MFG_TEMP_OFFSET     (MFG_MAC_OFFSET + BT_ADDR_SIZE)
-#define MFG_DATA_LEN        (MFG_TEMP_OFFSET + sizeof(int16_t))
-
-#define TEMP_NO_READING  INT16_MIN   /* 0x8000: no valid reading */
-
-/* Each cycle: read the temperature, start advertising (an alarm stops it after
- * ADV_DURATION_MS), sleep ADV_CYCLE_MS
- */
-#define ADV_INTERVAL_MS  20     /* time between packets while advertising (BLE min 20 ms) */
-#define ADV_DURATION_MS  100    /* how long we advertise each cycle */
-#define ADV_CYCLE_MS     5000   /* start of one cycle to the start of the next (+ reading time) */
-
-BUILD_ASSERT(ADV_DURATION_MS < ADV_CYCLE_MS, "advertising must be shorter than the cycle");
-
-#define ADV_TX_POWER_DBM  0    /* radio output power (BG22 max +6 dBm) */
-#define DECI_DBM_PER_DBM  10    /* the Silabs library counts power in 0.1 dBm steps */
-
-/* In the Silabs Bluetooth library, but not in any header: Zephyr's driver declares it the
- * same way (zephyr/drivers/bluetooth/hci/hci_silabs_efr32.c). Returns the power actually set.
- */
-int16_t BTLE_LL_SetMaxPower(int16_t power);
-
-static uint8_t mfg_data[MFG_DATA_LEN];   /* filled in main() before the first advertisement */
-
-static const struct bt_data ad[] = {
-	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
-	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
-};
-
 /* Called by Zephyr the instant the button is pressed (runs in interrupt context) */
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	press_count++;
-}
-
-/* Runs ADV_DURATION_MS after advertising starts (same idea as AL300's stop_adv_wk): radio off */
-static void stop_adv_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	bt_le_adv_stop();
-}
-
-static K_WORK_DELAYABLE_DEFINE(stop_adv_work, stop_adv_handler);
-
-/* Set the Bluetooth TX power. The Silabs library returns the power it actually set (the
- * nearest level the radio supports), so we compare that with what we asked for.
- * Call after bt_enable(). Returns 0 if it matches, -ERANGE if the radio uses a different level.
- */
-static int ble_set_tx_power(int8_t requested_dbm)
-{
-	int16_t set_deci_dbm = BTLE_LL_SetMaxPower(requested_dbm * DECI_DBM_PER_DBM);
-	int set_dbm = DIV_ROUND_CLOSEST(set_deci_dbm, DECI_DBM_PER_DBM);
-
-	if (set_dbm != requested_dbm) {
-		printf("TX power FAILED: requested %d dBm, radio uses %d dBm\n", requested_dbm, set_dbm);
-		return -ERANGE;
-	}
-	printf("TX power %d dBm\n", set_dbm);
-	return 0;
-}
-
-/* Wake the HCT6911, turn the excitation current back on (setup_pt100), take one reading and put
- * it back to sleep. Returns the temperature in 0.01 °C, or TEMP_NO_READING on any failure
- * (the function that failed has already printed why).
- */
-static int16_t read_temperature(void)
-{
-	int32_t pt100_code;
-	bool reading_ok = (hct6911_wake() == 0) &&
-			  (hct6911_setup_pt100() == 0) &&
-			  (hct6911_read_raw(&pt100_code) == 0);
-
-	/* Back to sleep (< 1 uA) even if the reading failed */
-	hct6911_sleep();
-
-	if (!reading_ok) {
-		return TEMP_NO_READING;
-	}
-
-	float r_ohm = pt100_code_to_ohm(pt100_code);
-	float temp_c = pt100_ohm_to_celsius(r_ohm);
-
-	if (temp_c < PT100_MIN_CELSIUS || temp_c > PT100_MAX_CELSIUS) {
-		printf("PT100 out of range: R = %.3f ohm (probe unplugged or shorted?)\n", (double)r_ohm);
-		return TEMP_NO_READING;
-	}
-
-	/* printf takes doubles: (double) makes the float -> double step explicit */
-	printf("PT100 R = %.3f ohm, T = %.2f C\n", (double)r_ohm, (double)temp_c);
-
-	/* 23.40 °C -> 2340 (rounded, so 23.3999 doesn't become 2339) */
-	return (int16_t)lroundf(temp_c * 100.0f);
 }
 
 int main(void)
@@ -153,80 +50,28 @@ int main(void)
 	gpio_init_callback(&button_cb, button_pressed, BIT(button.pin));
 	gpio_add_callback(button.port, &button_cb);
 
-	/* Temperature ADC (powered from boot, see adc_3v3 in dl002.dts): init, wake, reset,
-	 * configure for the PT100, then sleep until the first reading.
-	 * Wake first: after a reset without a power cycle (e.g. flashing), the HCT6911 can still be
-	 * asleep from the previous run, and a sleeping HCT6911 ignores a reset ([HCT] p.20).
-	 * Stops at the first failing step; that function prints why.
-	 */
-	bool adc_ready = (hct6911_init() == 0) &&
-			 (hct6911_wake() == 0) &&
-			 (hct6911_reset() == 0) &&
-			 (hct6911_setup_pt100() == 0) &&
-			 (hct6911_sleep() == 0);
+	/* On failure it prints why, and every temperature_read() gives TEMP_NO_READING */
+	temperature_init();
 
-	if (!adc_ready) {
-		printf("HCT6911 not ready: no temperature readings\n");
-	}
-
-	/* Start the Bluetooth stack (radio library, controller) */
-	int err = bt_enable(NULL);
-	if (err) {
-		printf("Bluetooth init failed (err %d)\n", err);
+	/* On failure it prints why; without Bluetooth there is nothing to do */
+	if (ble_init() != 0) {
 		return 0;
-	}
-	printf("Bluetooth initialized\n");
-
-	ble_set_tx_power(ADV_TX_POWER_DBM);   /* on failure it prints what the radio uses instead */
-
-	/* Our own (identity) address, e.g. D4:4A:85:BF:3E:17 (public) */
-	bt_addr_le_t identity_address;
-	size_t identity_count = 1;
-	char address_text[BT_ADDR_LE_STR_LEN];
-
-	bt_id_get(&identity_address, &identity_count);
-	bt_addr_le_to_str(&identity_address, address_text, sizeof(address_text));
-	printf("Bluetooth address %s\n", address_text);
-
-	/* Fixed part of the advertisement: company ID (little-endian, Bluetooth spec), then the marker */
-	sys_put_le16(TRACKONOMY_COMPANY_ID, &mfg_data[MFG_COMPANY_OFFSET]);
-	sys_put_be16(TRACKONOMY_MARKER, &mfg_data[MFG_MARKER_OFFSET]);
-
-	/* Copy the MAC into the advertisement. Zephyr stores it reversed, so val[5] goes first
-	 * to make it read the same as the boot log.
-	 */
-	for (int byte_index = 0; byte_index < BT_ADDR_SIZE; byte_index++) {
-		mfg_data[MFG_MAC_OFFSET + byte_index] = identity_address.a.val[BT_ADDR_SIZE - 1 - byte_index];
 	}
 
 	printf("Advertising %d ms (packet every %d ms) every %d ms\n",
-	       ADV_DURATION_MS, ADV_INTERVAL_MS, ADV_CYCLE_MS);
+	       DL002_ADV_DURATION_MS, DL002_ADV_INTERVAL_MS, DL002_ADV_CYCLE_MS);
 
 	while (1) {
-		/* Stays 0x8000 unless we get a valid reading below */
-		int16_t temp_centi_celsius = TEMP_NO_READING;
+		/* 0.01 °C, or TEMP_NO_READING (0x8000) if there is no valid reading */
+		int16_t temp_centi_celsius = temperature_read();
 
-		if (adc_ready) {
-			temp_centi_celsius = read_temperature();
-		}
+		ble_set_temperature(temp_centi_celsius);
 
-		/* Put the temperature into the advertisement (big-endian: 2340 -> 09 24) */
-		sys_put_be16((uint16_t)temp_centi_celsius, &mfg_data[MFG_TEMP_OFFSET]);
-
-		/* Start advertising: non-connectable, fixed identity address, one packet every ADV_INTERVAL_MS */
-		err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_USE_IDENTITY,
-						      BT_GAP_MS_TO_ADV_INTERVAL(ADV_INTERVAL_MS),
-						      BT_GAP_MS_TO_ADV_INTERVAL(ADV_INTERVAL_MS), NULL),
-				      ad, ARRAY_SIZE(ad), NULL, 0);
-		if (err) {
-			printf("Advertising failed to start (err %d)\n", err);
-		} else {
-			/* Alarm: stop advertising after ADV_DURATION_MS */
-			k_work_schedule(&stop_adv_work, K_MSEC(ADV_DURATION_MS));
-		}
+		/* On failure it prints why; we try again next cycle */
+		ble_adv_start();
 
 		/* The alarm stops advertising during this sleep; CONFIG_PM puts the chip in EM2 */
-		k_msleep(ADV_CYCLE_MS);
+		k_msleep(DL002_ADV_CYCLE_MS);
 	}
 
 	return 0;

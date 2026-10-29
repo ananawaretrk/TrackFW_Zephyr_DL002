@@ -1,5 +1,6 @@
 #include <zephyr/logging/log.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <zephyr/kernel.h>          /* k_msleep() */
 #include <zephyr/drivers/gpio.h>    /* GPIO / LED functions */
 #include "app_config.h"             /* DL002_ADV_* settings */
@@ -71,13 +72,21 @@ int main(void)
 	LOG_INF("Advertising %d ms (packet every %d ms) every %d ms",
 	        DL002_ADV_DURATION_MS, DL002_ADV_INTERVAL_MS, DL002_ADV_CYCLE_MS);
 
+	int64_t last_reading_ms = 0;
+	bool first_reading = true;
+
 	while (1) {
-		/* 0.01 °C, or TEMP_NO_READING (0x8000) if there is no valid reading */
-		int16_t temp_centi_celsius = temperature_read();
+		/* Temperature: a new reading on the first cycle, then once a minute has passed */
+		if (first_reading || k_uptime_get() - last_reading_ms >= DL002_TEMP_MEASURE_INTERVAL_MS) {
+			/* 0.01 °C, or TEMP_NO_READING (0x8000) if there is no valid reading */
+			int16_t temp_centi_celsius = temperature_read();
 
-		ble_set_temperature(temp_centi_celsius);
+			ble_set_temperature(temp_centi_celsius);
+			last_reading_ms = k_uptime_get();
+			first_reading = false;
+		}
 
-		/* On failure it prints why; we try again next cycle */
+		/* Advertising: every cycle, with the latest temperature. On failure it prints why */
 		ble_adv_start();
 
 		/* The alarm stops advertising during this sleep; CONFIG_PM puts the chip in EM2 */

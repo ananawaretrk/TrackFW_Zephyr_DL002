@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <errno.h>       /* EIO */
 #include <math.h>        /* lroundf() */
+#include <stdlib.h>      /* abs() */
 #include "hct6911.h"     /* temperature ADC (PT100 front end) */
 #include "pt100.h"       /* code -> ohm -> °C */
 #include "temperature.h"
@@ -63,14 +64,22 @@ int16_t temperature_read(void)
 	float r_ohm = pt100_code_to_ohm(pt100_code);
 	float temp_c = pt100_ohm_to_celsius(r_ohm);
 
+	/* For the logs: whole numbers, no %f (printing floats costs ~5 KB of flash) */
+	int r_milliohm = (int)lroundf(r_ohm * 1000.0f);
+	int r_milliohm_abs = abs(r_milliohm);
+
 	if (temp_c < PT100_MIN_CELSIUS || temp_c > PT100_MAX_CELSIUS) {
-		LOG_WRN("PT100 out of range: R = %.3f ohm (probe unplugged or shorted?)", (double)r_ohm);
+		LOG_WRN("PT100 out of range: R = %s%d.%03d ohm (probe unplugged or shorted?)",
+		        (r_milliohm < 0) ? "-" : "", r_milliohm_abs / 1000, r_milliohm_abs % 1000);
 		return TEMP_NO_READING;
 	}
 
-	/* %f expects a double: (double) makes the float -> double step explicit */
-	LOG_INF("PT100 R = %.3f ohm, T = %.2f C", (double)r_ohm, (double)temp_c);
-
 	/* 23.40 °C -> 2340 (rounded, so 23.3999 doesn't become 2339) */
-	return (int16_t)lroundf(temp_c * 100.0f);
+	int16_t temp_centi_celsius = (int16_t)lroundf(temp_c * 100.0f);
+	int temp_abs = abs(temp_centi_celsius);
+
+	LOG_INF("PT100 R = %d.%03d ohm, T = %s%d.%02d C",
+	        r_milliohm_abs / 1000, r_milliohm_abs % 1000,
+	        (temp_centi_celsius < 0) ? "-" : "", temp_abs / 100, temp_abs % 100);
+	return temp_centi_celsius;
 }

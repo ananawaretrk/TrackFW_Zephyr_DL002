@@ -6,10 +6,12 @@
 #include <zephyr/logging/log.h>
 #include <stdint.h>
 #include <errno.h>                  /* ENOENT */
+#include <stdlib.h>                 /* abs() */
 #include <zephyr/kernel.h>          /* k_work_schedule() */
 #include <zephyr/sys/byteorder.h>   /* sys_put_be16(), sys_put_le16() */
 #include <zephyr/sys/util.h>        /* MIN() */
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>  /* BT_CONN_CB_DEFINE(), bt_conn_get_dst() */
 #include "app_config.h"             /* DL002_ADV_* settings */
 #include "ble.h"
 
@@ -49,11 +51,20 @@ static const struct bt_data ad[] = {
 	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
 };
 
-/* Runs DL002_ADV_DURATION_MS after advertising starts (same idea as AL300's stop_adv_wk): radio off */
-static void stop_adv_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
+/* Connectable window: "general discoverable" tells phones they may list us and connect */
+static const struct bt_data ad_connectable[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
+	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
+};
 
+/* Scan response, sent only when a phone asks: our name, so the phone shows "DL002" */
+static const struct bt_data sd_connectable[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+};
+
+/* Stop advertising (does nothing if we aren't advertising) */
+void ble_adv_stop(void)
+{
 	int err = bt_le_adv_stop();
 
 	if (err) {
@@ -61,7 +72,41 @@ static void stop_adv_handler(struct k_work *work)
 	}
 }
 
+/* Runs DL002_ADV_DURATION_MS after advertising starts (same idea as AL300's stop_adv_wk): radio off */
+static void stop_adv_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	ble_adv_stop();
+}
+
 static K_WORK_DELAYABLE_DEFINE(stop_adv_work, stop_adv_handler);
+
+/* Called by the Bluetooth stack when a phone connects (or the attempt fails) */
+static void connected(struct bt_conn *conn, uint8_t err)
+{
+	char address_text[BT_ADDR_LE_STR_LEN];
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), address_text, sizeof(address_text));
+	if (err) {
+		LOG_ERR("Connection from %s failed (err 0x%02x)", address_text, err);
+		return;
+	}
+	LOG_INF("Connected: %s", address_text);
+}
+
+/* Called when the connection ends; reason 0x13 = the phone disconnected */
+static void disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	char address_text[BT_ADDR_LE_STR_LEN];
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), address_text, sizeof(address_text));
+	LOG_INF("Disconnected: %s (reason 0x%02x)", address_text, reason);
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+	.connected = connected,
+	.disconnected = disconnected,
+};
 
 /* Set the Bluetooth TX power (at most TX_POWER_MAX_DBM). The radio uses the nearest step at or
  * just below the request (lowest step -27.5 dBm); the Silabs library returns that step, so we
@@ -77,9 +122,12 @@ static void ble_set_tx_power(int8_t requested_dbm)
 	}
 
 	int16_t set_deci_dbm = BTLE_LL_SetMaxPower(allowed_dbm * DECI_DBM_PER_DBM);
+	int set_deci_dbm_abs = abs(set_deci_dbm);
 
-	LOG_INF("TX power: requested %d dBm, radio uses %.1f dBm",
-	        allowed_dbm, (double)set_deci_dbm / DECI_DBM_PER_DBM);
+	/* Whole numbers, no %f: -275 -> "-27.5" */
+	LOG_INF("TX power: requested %d dBm, radio uses %s%d.%d dBm",
+	        allowed_dbm, (set_deci_dbm < 0) ? "-" : "",
+	        set_deci_dbm_abs / DECI_DBM_PER_DBM, set_deci_dbm_abs % DECI_DBM_PER_DBM);
 }
 
 /* Start the Bluetooth stack, set the TX power and fill the fixed part of the advertisement
@@ -150,5 +198,25 @@ int ble_adv_start(void)
 
 	/* Alarm: stop advertising after DL002_ADV_DURATION_MS */
 	k_work_schedule(&stop_adv_work, K_MSEC(DL002_ADV_DURATION_MS));
+	return 0;
+}
+
+/* Start connectable advertising (one packet every DL002_CONNECTABLE_ADV_INTERVAL_MS).
+ * Runs until ble_adv_stop(), or until a phone connects (then the stack stops it).
+ * Returns 0, or the bt_le_adv_start() error.
+ */
+int ble_adv_start_connectable(void)
+{
+	int err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
+						  BT_GAP_MS_TO_ADV_INTERVAL(DL002_CONNECTABLE_ADV_INTERVAL_MS),
+						  BT_GAP_MS_TO_ADV_INTERVAL(DL002_CONNECTABLE_ADV_INTERVAL_MS), NULL),
+				  ad_connectable, ARRAY_SIZE(ad_connectable),
+				  sd_connectable, ARRAY_SIZE(sd_connectable));
+
+	if (err) {
+		LOG_ERR("Connectable advertising failed to start (err %d)", err);
+		return err;
+	}
+	LOG_INF("Connectable for %d ms", DL002_CONNECTABLE_WINDOW_MS);
 	return 0;
 }

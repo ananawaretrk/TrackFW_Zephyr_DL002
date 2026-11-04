@@ -16,4 +16,8 @@ BUILD_ASSERT(DL002_ADV_DURATION_MS < DL002_ADV_CYCLE_MS, "advertising must be sh
 /* A new temperature reading at most every DL002_TEMP_MEASURE_INTERVAL_MS, checked once per cycle */
 #define DL002_TEMP_MEASURE_INTERVAL_MS  60000   /* 1 min */
 
+/* After power-on a phone can connect for this long (to configure the device later) */
+#define DL002_CONNECTABLE_WINDOW_MS       15000   /* 15 s */
+#define DL002_CONNECTABLE_ADV_INTERVAL_MS 100     /* one packet every 100 ms during the window */
+
 #endif

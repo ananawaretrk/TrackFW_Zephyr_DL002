@@ -69,6 +69,15 @@ int main(void)
 		return 0;
 	}
 
+	/* No reading yet: advertise "no reading" rather than 0.00 °C during the window */
+	ble_set_temperature(TEMP_NO_READING);
+
+	/* Connectable for DL002_CONNECTABLE_WINDOW_MS after power-on, so a phone can connect */
+	if (ble_adv_start_connectable() == 0) {
+		k_msleep(DL002_CONNECTABLE_WINDOW_MS);
+		ble_adv_stop();
+	}
+
 	LOG_INF("Advertising %d ms (packet every %d ms) every %d ms",
 	        DL002_ADV_DURATION_MS, DL002_ADV_INTERVAL_MS, DL002_ADV_CYCLE_MS);
 

@@ -6,6 +6,8 @@
 #include "app_config.h"             /* DL002_ADV_* settings */
 #include "temperature.h"            /* temperature_init(), temperature_read() */
 #include "ble.h"                    /* ble_init(), ble_set_temperature(), ble_adv_start() */
+#include <zephyr/dfu/mcuboot.h>     /* boot_is_img_confirmed(), boot_write_img_confirmed() */
+#include <app_version.h>            /* APP_VERSION_STRING, from the VERSION file */
 
 LOG_MODULE_REGISTER(main);
 
@@ -27,8 +29,28 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 	press_count++;
 }
 
+/* After a firmware update the new firmware runs "on trial": if the device resets before this
+ * is called, MCUboot puts the old firmware back. Does nothing on normal boots.
+ */
+static void confirm_firmware(void)
+{
+	if (boot_is_img_confirmed()) {
+		return;
+	}
+
+	int err = boot_write_img_confirmed();
+
+	if (err) {
+		LOG_ERR("Firmware confirm FAILED (err %d)", err);
+		return;
+	}
+	LOG_INF("New firmware v%s confirmed", APP_VERSION_STRING);
+}
+
 int main(void)
 {
+	LOG_INF("DL002 firmware v%s", APP_VERSION_STRING);
+
 	if (!gpio_is_ready_dt(&led_green) || !gpio_is_ready_dt(&led_red)) {
 		LOG_ERR("LED GPIO not ready");
 		return 0;
@@ -77,6 +99,9 @@ int main(void)
 		k_msleep(DL002_CONNECTABLE_WINDOW_MS);
 		ble_adv_stop();
 	}
+
+	/* BLE works, so a phone could connect and send the next update: keep this firmware */
+	confirm_firmware();
 
 	LOG_INF("Advertising %d ms (packet every %d ms) every %d ms",
 	        DL002_ADV_DURATION_MS, DL002_ADV_INTERVAL_MS, DL002_ADV_CYCLE_MS);

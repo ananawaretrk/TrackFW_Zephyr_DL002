@@ -57,7 +57,7 @@ static const struct bt_data ad_connectable[] = {
 	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)),
 };
 
-/* Scan response, sent only when a phone asks: our name, so the phone shows "DL002" */
+/* Scan response, sent only when a phone asks: our name (CONFIG_BT_DEVICE_NAME), so the phone lists us */
 static const struct bt_data sd_connectable[] = {
 	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };

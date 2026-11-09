@@ -6,6 +6,7 @@
 #include "app_config.h"             /* DL002_ADV_* settings */
 #include "temperature.h"            /* temperature_init(), temperature_read() */
 #include "ble.h"                    /* ble_init(), ble_set_temperature(), ble_adv_start() */
+#include "battery.h"                /* battery_init(), battery_read_mv() */
 #include <zephyr/dfu/mcuboot.h>     /* boot_is_img_confirmed(), boot_write_img_confirmed() */
 #include <app_version.h>            /* APP_VERSION_STRING, from the VERSION file */
 
@@ -86,6 +87,9 @@ int main(void)
 	/* On failure it prints why, and every temperature_read() gives TEMP_NO_READING */
 	temperature_init();
 
+	/* On failure it prints why, and every battery_read_mv() gives BATTERY_NO_READING */
+	battery_init();
+
 	/* On failure it prints why; without Bluetooth there is nothing to do */
 	if (ble_init() != 0) {
 		return 0;
@@ -116,6 +120,7 @@ int main(void)
 			int16_t temp_centi_celsius = temperature_read();
 
 			ble_set_temperature(temp_centi_celsius);
+			battery_read_mv();
 			last_reading_ms = k_uptime_get();
 			first_reading = false;
 		}

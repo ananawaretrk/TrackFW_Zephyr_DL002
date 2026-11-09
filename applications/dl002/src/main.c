@@ -5,7 +5,7 @@
 #include <zephyr/drivers/gpio.h>    /* GPIO / LED functions */
 #include "app_config.h"             /* DL002_ADV_* settings */
 #include "temperature.h"            /* temperature_init(), temperature_read() */
-#include "ble.h"                    /* ble_init(), ble_set_temperature(), ble_adv_start() */
+#include "ble.h"                    /* ble_init(), ble_set_temperature(), ble_set_battery(), ble_adv_start() */
 #include "battery.h"                /* battery_init(), battery_read_mv() */
 #include <zephyr/dfu/mcuboot.h>     /* boot_is_img_confirmed(), boot_write_img_confirmed() */
 #include <app_version.h>            /* APP_VERSION_STRING, from the VERSION file */
@@ -95,8 +95,9 @@ int main(void)
 		return 0;
 	}
 
-	/* No reading yet: advertise "no reading" rather than 0.00 °C during the window */
+	/* No reading yet: advertise "no reading" rather than 0.00 °C / 0 V during the window */
 	ble_set_temperature(TEMP_NO_READING);
+	ble_set_battery(BATTERY_NO_READING);
 
 	/* Connectable for DL002_CONNECTABLE_WINDOW_MS after power-on, so a phone can connect */
 	if (ble_adv_start_connectable() == 0) {
@@ -120,7 +121,7 @@ int main(void)
 			int16_t temp_centi_celsius = temperature_read();
 
 			ble_set_temperature(temp_centi_celsius);
-			battery_read_mv();
+			ble_set_battery(battery_read_mv());
 			last_reading_ms = k_uptime_get();
 			first_reading = false;
 		}

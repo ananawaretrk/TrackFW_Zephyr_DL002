@@ -9,19 +9,21 @@
 #include <stdlib.h>                 /* abs() */
 #include <zephyr/kernel.h>          /* k_work_schedule() */
 #include <zephyr/sys/byteorder.h>   /* sys_put_be16(), sys_put_le16() */
-#include <zephyr/sys/util.h>        /* MIN() */
+#include <zephyr/sys/util.h>        /* MIN(), DIV_ROUND_CLOSEST() */
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>  /* BT_CONN_CB_DEFINE(), bt_conn_get_dst() */
 #include "app_config.h"             /* DL002_ADV_* settings */
 #include "ble.h"
+#include "battery.h"                /* BATTERY_NO_READING */
 
 LOG_MODULE_REGISTER(ble);
 
-/* Manufacturer data, 12 bytes, as seen in nRF Connect:
+/* Manufacturer data, 13 bytes, as seen in nRF Connect:
  * F7 0E             company 0x0EF7 "Trackonomy Systems, Inc." (little-endian, set by the Bluetooth spec)
  * 52 58             Trackonomy marker (same as AL300)
  * D4 4A 85 BF 3E 17 MAC, same order as the boot log
  * 09 24             temperature, int16 big-endian, 0.01 °C (0x0924 = 2340 = 23.40 °C)
+ * 1E                battery, 0.1 V (0x1E = 30 = 3.0 V), FF = no reading. Always the last byte
  */
 #define TRACKONOMY_COMPANY_ID  0x0EF7
 #define TRACKONOMY_MARKER      0x5258
@@ -30,7 +32,12 @@ LOG_MODULE_REGISTER(ble);
 #define MFG_MARKER_OFFSET   (MFG_COMPANY_OFFSET + sizeof(uint16_t))
 #define MFG_MAC_OFFSET      (MFG_MARKER_OFFSET + sizeof(uint16_t))
 #define MFG_TEMP_OFFSET     (MFG_MAC_OFFSET + BT_ADDR_SIZE)
-#define MFG_DATA_LEN        (MFG_TEMP_OFFSET + sizeof(int16_t))
+#define MFG_BATTERY_OFFSET  (MFG_TEMP_OFFSET + sizeof(int16_t))
+#define MFG_DATA_LEN        (MFG_BATTERY_OFFSET + sizeof(uint8_t))
+
+#define MV_PER_DECIVOLT          100   /* battery byte is in 0.1 V steps */
+#define BATTERY_BYTE_MAX         127   /* top bit stays 0, like the old tape's 8-bit battery type */
+#define BATTERY_BYTE_NO_READING  0xFF  /* real readings are capped at 127, so FF can only mean this */
 
 /* BG22 datasheet table 4.13 note 3: specified up to 6 dBm; above that, harmonics may exceed
  * regulatory limits. The Silabs library itself allows up to 8.5 dBm, so we limit it here.
@@ -178,6 +185,23 @@ int ble_init(void)
 void ble_set_temperature(int16_t temp_centi_celsius)
 {
 	sys_put_be16((uint16_t)temp_centi_celsius, &mfg_data[MFG_TEMP_OFFSET]);
+}
+
+/* Put the battery voltage into the advertisement, in 0.1 V steps: 3008 mV -> 30 (0x1E).
+ * No reading (BATTERY_NO_READING) -> FF. Goes on air from the next ble_adv_start().
+ */
+void ble_set_battery(uint16_t battery_mv)
+{
+	if (battery_mv == BATTERY_NO_READING) {
+		mfg_data[MFG_BATTERY_OFFSET] = BATTERY_BYTE_NO_READING;
+		return;
+	}
+
+	/* Rounded to the nearest 0.1 V (2990 mV -> 30); plain division would always round down (29) */
+	uint32_t battery_decivolts = DIV_ROUND_CLOSEST(battery_mv, MV_PER_DECIVOLT);
+
+	/* Capped so it fits the byte without wrapping, and can never be mistaken for FF */
+	mfg_data[MFG_BATTERY_OFFSET] = MIN(battery_decivolts, BATTERY_BYTE_MAX);
 }
 
 /* Start advertising: non-connectable, fixed identity address, one packet every
